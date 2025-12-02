@@ -19,6 +19,13 @@ st.markdown("### Generate professional scientific visualizations from CSV files"
 
 st.markdown("---")
 
+# App links configuration
+APP_LINKS = {
+    "Bar Graph Generator": "https://webtools-bar.streamlit.app/",
+    "Heatmap Generator": "https://webtools-heatmap.streamlit.app/",
+    "Venn Diagram Generator": "https://webtools-venn.streamlit.app/"
+}
+
 # Introduction
 col1, col2 = st.columns([2, 1])
 
@@ -26,13 +33,13 @@ with col1:
     st.markdown("""
     Welcome! This suite provides three powerful tools for creating publication-quality visualizations:
     
-    **Choose an app from the sidebar to get started →**
+    **Click on the buttons below to launch each visualization tool:**
     """)
 
 with col2:
-    st.info("💡 **New to Streamlit?**\n\nUse the sidebar to navigate between apps!")
+    st.info("💡 **New to Streamlit?**\n\nClick the buttons below to launch each tool in a new tab!")
 
-# App cards
+# App cards with links
 st.markdown("## 🎨 Available Tools")
 
 col1, col2, col3 = st.columns(3)
@@ -50,6 +57,14 @@ with col1:
     **Best for:** Gene expression, correlation matrices, comparison studies
     """)
     
+    # Link button for Heatmap Generator
+    st.link_button(
+        "🚀 Launch Heatmap Generator",
+        APP_LINKS["Heatmap Generator"],
+        help="Opens the Heatmap Generator in a new tab",
+        use_container_width=True
+    )
+
 with col2:
     st.markdown("""
     ### ⭕ Venn Diagrams
@@ -62,6 +77,14 @@ with col2:
     
     **Best for:** Set comparisons, gene lists, categorical overlaps
     """)
+    
+    # Link button for Venn Diagram Generator
+    st.link_button(
+        "🚀 Launch Venn Diagram Generator",
+        APP_LINKS["Venn Diagram Generator"],
+        help="Opens the Venn Diagram Generator in a new tab",
+        use_container_width=True
+    )
 
 with col3:
     st.markdown("""
@@ -75,33 +98,67 @@ with col3:
     
     **Best for:** Group comparisons, distributions, summary statistics
     """)
+    
+    # Link button for Bar Graph Generator
+    st.link_button(
+        "🚀 Launch Bar Graph Generator",
+        APP_LINKS["Bar Graph Generator"],
+        help="Opens the Bar Graph Generator in a new tab",
+        use_container_width=True
+    )
 
 st.markdown("---")
 
+# Quick launch section
+st.markdown("## 🚀 Quick Launch")
+st.markdown("Click any link below to open the corresponding app:")
+
+# Create quick launch buttons in a row
+launch_col1, launch_col2, launch_col3 = st.columns(3)
+
+with launch_col1:
+    if st.button("📊 **Bar Graph Generator**", use_container_width=True):
+        st.markdown(f"[Click here to open Bar Graph Generator ↗]({APP_LINKS['Bar Graph Generator']})")
+
+with launch_col2:
+    if st.button("🔥 **Heatmap Generator**", use_container_width=True):
+        st.markdown(f"[Click here to open Heatmap Generator ↗]({APP_LINKS['Heatmap Generator']})")
+
+with launch_col3:
+    if st.button("⭕ **Venn Diagram Generator**", use_container_width=True):
+        st.markdown(f"[Click here to open Venn Diagram Generator ↗]({APP_LINKS['Venn Diagram Generator']})")
+
 # Quick start guide
-with st.expander("🚀 Quick Start Guide"):
+with st.expander("📖 Quick Start Guide", expanded=True):
     st.markdown("""
     ### Getting Started
     
-    1. **Select an app** from the sidebar
+    1. **Click any of the launch buttons above** to open the corresponding app
     2. **Upload your CSV file** using the file uploader
     3. **Configure parameters** using the controls
     4. **Generate your visualization**
     5. **Download** in PNG or SVG format
     
-    ### CSV Format Tips
+    ### Direct App Links:
+    - **[Bar Graph Generator]({bar_link})** - Create publication-quality bar charts
+    - **[Heatmap Generator]({heatmap_link})** - Generate interactive heatmaps
+    - **[Venn Diagram Generator]({venn_link})** - Create Venn/Euler diagrams
     
+    ### CSV Format Tips
     - Use comma-separated values
     - Include column headers
     - Remove special characters
     - Check for missing values
     
     ### Export Options
-    
     - **PNG**: Great for presentations and web
     - **SVG**: Best for publications (vector format)
     - **High DPI**: Use 300+ for print quality
-    """)
+    """.format(
+        bar_link=APP_LINKS["Bar Graph Generator"],
+        heatmap_link=APP_LINKS["Heatmap Generator"],
+        venn_link=APP_LINKS["Venn Diagram Generator"]
+    ))
 
 # Features
 with st.expander("✨ Key Features"):
@@ -152,31 +209,44 @@ with st.expander("📖 Example Data Formats"):
 
 st.markdown("---")
 
-# Footer
-col1, col2, col3 = st.columns(3)
+# Footer with direct links
+st.markdown("## 🔗 Direct Links to Apps")
+link_col1, link_col2, link_col3 = st.columns(3)
 
-with col1:
-    st.markdown("""
-    ### 📚 Documentation
-    - Check the README for detailed instructions
-    - Each app has built-in examples
-    - Hover over controls for tooltips
+with link_col1:
+    st.markdown(f"""
+    ### 📊 Bar Graph Generator
+    [Open Bar Graph Generator ↗]({APP_LINKS['Bar Graph Generator']})
+    
+    **Features:**
+    - Multiple orientations
+    - Grouped/stacked options
+    - Error bars
+    - Statistical summaries
     """)
 
-with col2:
-    st.markdown("""
-    ### 💾 Output Formats
-    - PNG (raster images)
-    - SVG (vector graphics)
-    - CSV (processed data)
+with link_col2:
+    st.markdown(f"""
+    ### 🔥 Heatmap Generator
+    [Open Heatmap Generator ↗]({APP_LINKS['Heatmap Generator']})
+    
+    **Features:**
+    - Custom color schemes
+    - Significance stars
+    - Publication-ready styling
+    - Interactive exploration
     """)
 
-with col3:
-    st.markdown("""
-    ### 🎯 Best Practices
-    - Use 300+ DPI for publications
-    - Export SVG for journals
-    - Preview before downloading
+with link_col3:
+    st.markdown(f"""
+    ### ⭕ Venn Diagram Generator
+    [Open Venn Diagram Generator ↗]({APP_LINKS['Venn Diagram Generator']})
+    
+    **Features:**
+    - 2-way and 3-way support
+    - Overlap statistics
+    - Custom colors
+    - Euler diagram support
     """)
 
 st.markdown("---")
@@ -184,4 +254,18 @@ st.markdown("""
 <div style='text-align: center'>
     <p>Built with Streamlit 🎈 | Ready for scientific publication 📄</p>
 </div>
+""", unsafe_allow_html=True)
+
+# Add some JavaScript to make links open in new tab by default
+st.markdown("""
+<script>
+// Make all external links open in new tab
+document.addEventListener('DOMContentLoaded', function() {
+    const links = document.querySelectorAll('a[href^="http"]');
+    links.forEach(link => {
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+    });
+});
+</script>
 """, unsafe_allow_html=True)
