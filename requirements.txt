@@ -4,3 +4,16 @@ numpy>=1.24.0
 matplotlib>=3.7.0
 seaborn>=0.12.0
 matplotlib-venn>=0.11.9
+
+# Added for Freedman–Lane + bootstrapping + permutations
+statsmodels>=0.14.0
+scipy>=1.10.0
+
+# Added for parallel computing inside Streamlit
+joblib>=1.3.0
+
+# Optional but recommended for Streamlit file caching + UX
+tqdm>=4.65.0
+
+# To support CSV uploads with weird encodings
+chardet>=5.1.0
