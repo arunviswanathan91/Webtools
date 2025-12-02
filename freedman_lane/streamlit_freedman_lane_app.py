@@ -1,35 +1,32 @@
-# streamlit_freedman_lane_app.py
+# streamlit_statistical_analysis_app.py
 """
-Generic Streamlit app for Freedman-Lane permutation adjustment and statistical analysis.
+Generic Statistical Analysis App for Population Studies
 
-Features:
-- Works with ANY expression/feature data and clinical metadata
-- Flexible data format support (wide or long)
-- Configurable Freedman-Lane permutation tests
-- Multiple effect size measures and bootstrap options
-- Comprehensive progress tracking
-- Parallel processing support
+Supports ANY type of data:
+- Clinical/epidemiological studies
+- Genomics/proteomics/metabolomics
+- Environmental studies
+- Social science research
+- Any other observational or experimental data
 
-Usage:
-$ pip install -r requirements.txt
-$ streamlit run streamlit_freedman_lane_app.py
+Analysis Methods:
+- Descriptive statistics
+- Group comparisons (with/without covariate adjustment)
+- Continuous associations
+- Permutation tests (Freedman-Lane)
+- Standard parametric tests
+- Multiple testing correction
 
-Requirements:
-streamlit
-pandas
-numpy
-statsmodels
-joblib
-scipy
+Author: Research Analysis Tool
+License: MIT
 """
 
 import io
 import os
-import math
 import time
-import tempfile
 import warnings
 from typing import List, Optional, Tuple, Dict, Any
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -37,1098 +34,1598 @@ import streamlit as st
 import statsmodels.formula.api as smf
 from joblib import Parallel, delayed
 from scipy import stats
+from scipy.stats import pearsonr, spearmanr
 
 warnings.filterwarnings("ignore")
 
-# ---------- Configuration ----------
+# =============================================================================
+# INSTRUCTIONS AND DOCUMENTATION
+# =============================================================================
 
-class AnalysisConfig:
-    """Configuration container for analysis parameters"""
-    def __init__(self):
-        self.n_perm = 2000
-        self.n_boot = 1000
-        self.min_n_per_group = 8
-        self.workers = 1
-        self.alpha = 0.05
-        self.bootstrap_ci_method = 'percentile'  # or 'bca'
-        self.effect_size_measures = ['cohens_d']  # can add 'hedges_g', 'glass_delta'
-        self.seed = 42
-        self.show_progress = True
+CSV_INSTRUCTIONS = """
+## 📋 CSV Format Instructions
+
+### Option 1: Wide Format (Recommended for most studies)
+One row per subject/sample, columns for variables and features.
+
+**Example Structure:**
+```
+sample_id, age, sex, bmi, group, gene1, gene2, gene3, ...
+SUBJ001, 45, M, 24.5, control, 5.2, 3.1, 7.8, ...
+SUBJ002, 52, F, 28.3, treatment, 6.1, 4.2, 8.9, ...
+```
+
+**Required:**
+- One ID column (any name: subject_id, patient_id, sample_id, etc.)
+- At least one grouping or clinical variable
+- At least one feature/measurement column
+
+**Optional:**
+- Covariates (age, sex, batch, etc.)
+- Multiple grouping variables
+- Any number of features
 
 
-# ---------- Utilities ----------
+### Option 2: Long Format
+One row per observation, with separate columns for feature name and value.
 
-def smart_id_extraction(sample_id: Any, delimiter: str = '-') -> str:
-    """
-    Flexible ID extraction that handles various formats.
-    Can handle semicolon-separated, hyphen-separated, underscore-separated IDs.
-    """
+**Example Structure:**
+```
+sample_id, age, sex, group, feature_name, value
+SUBJ001, 45, M, control, gene1, 5.2
+SUBJ001, 45, M, control, gene2, 3.1
+SUBJ002, 52, F, treatment, gene1, 6.1
+```
+
+**Required:**
+- ID column
+- Feature name column
+- Value column
+- Clinical/grouping variables can be repeated or in separate file
+
+
+### Clinical/Metadata File (Optional)
+If your features are in a separate file, you can upload clinical data separately.
+
+**Example:**
+```
+subject_id, age, sex, bmi, diagnosis, treatment_arm
+SUBJ001, 45, M, 24.5, healthy, placebo
+SUBJ002, 52, F, 28.3, disease, active
+```
+
+**Merging:** The app will merge on ID columns (with flexible matching).
+
+
+### Data Types Supported
+- **Numeric:** Continuous measurements (expression, concentrations, scores)
+- **Categorical:** Groups, diagnoses, sex, treatment arms
+- **Binary:** Yes/No, Disease/Healthy, 0/1
+- **Missing data:** Represented as empty cells or NA (will be handled)
+
+
+### Common Use Cases
+
+**Clinical Study:**
+- IDs: patient_id
+- Groups: treatment_arm, disease_status
+- Covariates: age, sex, BMI, baseline_score
+- Features: biomarkers, lab_values, outcome_measures
+
+**Genomics Study:**
+- IDs: sample_id
+- Groups: case_control, tissue_type
+- Covariates: age, sex, batch, sequencing_depth
+- Features: gene_expression_values
+
+**Environmental Study:**
+- IDs: site_id, location_id
+- Groups: exposure_level, region
+- Covariates: season, temperature, population_density
+- Features: pollutant_concentrations, species_counts
+
+**Survey/Social Science:**
+- IDs: respondent_id
+- Groups: demographic_groups, intervention_status
+- Covariates: education, income, location
+- Features: survey_responses, behavioral_scores
+"""
+
+STATISTICAL_METHODS_INFO = """
+## 📊 Statistical Methods Available
+
+### 1. Descriptive Statistics
+- Summary statistics by group
+- Distribution visualizations
+- Missing data analysis
+- Sample size reporting
+
+### 2. Group Comparisons (Categorical Predictor)
+**When to use:** Comparing 2+ groups (e.g., case vs control, treatment arms)
+
+**Methods:**
+- **Freedman-Lane Permutation Test** (recommended with covariates)
+  - Non-parametric, exact p-values
+  - Properly adjusts for covariates
+  - Suitable for any distribution
+  - Use with: n_permutations (1000-10000)
+
+- **Standard Tests** (parametric)
+  - t-test (2 groups)
+  - ANOVA (3+ groups)
+  - Linear regression with covariates
+  - Faster but assumes normality
+
+**Output:**
+- p-values (raw and adjusted for multiple testing)
+- Effect sizes (Cohen's d, Hedges' g)
+- Confidence intervals
+- Mean differences
+
+### 3. Continuous Associations (Continuous Predictor)
+**When to use:** Relationship between continuous variables (e.g., age vs expression)
+
+**Methods:**
+- Pearson correlation (linear relationships)
+- Spearman correlation (monotonic relationships)
+- Linear regression with covariates
+- Permutation-based correlation tests
+
+**Output:**
+- Correlation coefficients
+- p-values
+- Regression slopes
+- R-squared values
+
+### 4. Covariate Adjustment
+**Why adjust?**
+- Control for confounding variables (age, sex, batch effects)
+- Isolate effect of interest
+- Reduce false positives
+
+**Methods:**
+- Freedman-Lane procedure (permutation-based)
+- Linear model residuals
+- Stratified analysis
+
+### 5. Multiple Testing Correction
+**Why needed?**
+- When testing many features (genes, biomarkers)
+- Controls false discovery rate (FDR)
+
+**Methods:**
+- Benjamini-Hochberg FDR (recommended)
+- Bonferroni (conservative)
+- Benjamini-Yekutieli (dependent tests)
+
+### 6. Effect Sizes
+- **Cohen's d:** Standardized mean difference
+- **Hedges' g:** Bias-corrected Cohen's d (small samples)
+- **Correlation (r):** Strength of linear relationship
+- **R²:** Proportion of variance explained
+
+All effect sizes include bootstrap confidence intervals.
+"""
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def flexible_id_match(id1: str, id2: str) -> bool:
+    """Flexible ID matching - handles various formats"""
+    if pd.isna(id1) or pd.isna(id2):
+        return False
+    
+    s1 = str(id1).strip().upper()
+    s2 = str(id2).strip().upper()
+    
+    # Direct match
+    if s1 == s2:
+        return True
+    
+    # Try matching first part before delimiter
+    for delim in ['-', '_', '.', ' ']:
+        if delim in s1 and delim in s2:
+            if s1.split(delim)[0] == s2.split(delim)[0]:
+                return True
+    
+    return False
+
+
+def extract_base_id(sample_id: Any, method: str = 'first_two') -> str:
+    """Extract base ID with multiple strategies"""
     if pd.isna(sample_id):
         return ""
+    
     s = str(sample_id).strip()
     
-    # Handle semicolon-separated (take first)
+    if method == 'none':
+        return s
+    
+    # Handle semicolon-separated
     if ';' in s:
         s = s.split(';')[0].strip()
     
-    # Handle delimiter-based extraction
-    if delimiter in s:
-        parts = s.split(delimiter)
-        # Keep first 2 parts if available
-        if len(parts) >= 2:
-            return f"{parts[0]}{delimiter}{parts[1]}"
+    if method == 'first_part':
+        # Take everything before first delimiter
+        for delim in ['-', '_', '.']:
+            if delim in s:
+                return s.split(delim)[0]
+        return s
+    
+    elif method == 'first_two':
+        # Take first two parts
+        for delim in ['-', '_', '.']:
+            if delim in s:
+                parts = s.split(delim)
+                if len(parts) >= 2:
+                    return f"{parts[0]}{delim}{parts[1]}"
+        return s
     
     return s
 
 
-def detect_numeric_columns(df: pd.DataFrame, exclude_cols: List[str] = None) -> List[str]:
+def detect_data_format(df: pd.DataFrame) -> Tuple[str, Dict[str, Any]]:
     """
-    Detect numeric columns that could be features.
-    More robust than checking for specific patterns.
+    Detect data format and suggest column mappings.
+    Returns: (format_type, suggestions_dict)
     """
-    if exclude_cols is None:
-        exclude_cols = []
+    suggestions = {}
     
-    exclude_set = set(exclude_cols)
-    # Common clinical/metadata column patterns to exclude
-    exclude_patterns = ['id', 'sample', 'patient', 'subject', 'group', 'class', 'label']
+    # Check for long format indicators
+    col_lower = [c.lower() for c in df.columns]
     
-    numeric_cols = []
-    for col in df.columns:
-        if col in exclude_set:
-            continue
-        
-        # Check if column name suggests it's metadata
-        col_lower = col.lower()
-        if any(pattern in col_lower for pattern in exclude_patterns):
-            continue
-        
-        # Check if numeric
-        if np.issubdtype(df[col].dtype, np.number):
-            numeric_cols.append(col)
+    # Long format indicators
+    feature_keywords = ['feature', 'gene', 'protein', 'variable', 'marker', 
+                       'metabolite', 'probe', 'transcript', 'peptide']
+    value_keywords = ['value', 'expression', 'abundance', 'intensity', 
+                     'concentration', 'level', 'measurement', 'score']
     
-    return numeric_cols
-
-
-def infer_data_format(df: pd.DataFrame) -> str:
-    """
-    Infer whether data is in wide or long format.
-    Long format typically has columns like: sample_id, feature, value
-    Wide format has: sample_id, feature1, feature2, ..., featureN
-    """
-    # Check for common long format indicators
-    col_names_lower = [c.lower() for c in df.columns]
-    
-    long_indicators = ['feature', 'gene', 'protein', 'metabolite', 'variable']
-    value_indicators = ['value', 'expression', 'abundance', 'intensity', 'z']
-    
-    has_feature_col = any(ind in col_names_lower for ind in long_indicators)
-    has_value_col = any(ind in col_names_lower for ind in value_indicators)
+    has_feature_col = any(any(kw in col for kw in feature_keywords) 
+                          for col in col_lower)
+    has_value_col = any(any(kw in col for kw in value_keywords) 
+                        for col in col_lower)
     
     if has_feature_col and has_value_col:
-        return 'long'
+        # Likely long format
+        for col, col_l in zip(df.columns, col_lower):
+            if any(kw in col_l for kw in feature_keywords):
+                suggestions['feature_col'] = col
+            if any(kw in col_l for kw in value_keywords):
+                suggestions['value_col'] = col
+        return 'long', suggestions
     
-    # If many numeric columns, likely wide format
-    numeric_cols = detect_numeric_columns(df)
-    if len(numeric_cols) > 5:
-        return 'wide'
+    # Check for wide format (many numeric columns)
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     
-    return 'unknown'
+    if len(numeric_cols) >= 5:
+        suggestions['feature_cols'] = numeric_cols
+        return 'wide', suggestions
+    
+    return 'unknown', suggestions
 
 
-# ---------- Statistical Functions ----------
-
-def compute_cohens_d(a, b):
-    """Compute Cohen's d effect size"""
-    a = np.asarray(a)
-    b = np.asarray(b)
-    if len(a) < 2 or len(b) < 2:
-        return np.nan
+def detect_id_column(df: pd.DataFrame) -> Optional[str]:
+    """Detect likely ID column"""
+    id_keywords = ['id', 'sample', 'subject', 'patient', 'individual', 
+                   'participant', 'specimen', 'case']
     
-    n1, n2 = len(a), len(b)
-    m1, m2 = np.nanmean(a), np.nanmean(b)
-    v1 = np.nanvar(a, ddof=1) if n1 > 1 else 0.0
-    v2 = np.nanvar(b, ddof=1) if n2 > 1 else 0.0
+    for col in df.columns:
+        col_lower = col.lower()
+        if any(kw in col_lower for kw in id_keywords):
+            # Check if values look like IDs (unique)
+            if df[col].nunique() == len(df):
+                return col
     
-    # Pooled standard deviation
-    denom = ((n1 - 1) * v1 + (n2 - 1) * v2) / (n1 + n2 - 2) if (n1 + n2 - 2) > 0 else 0.0
-    sd_pooled = math.sqrt(denom) if denom > 0 else 0.0
+    # Fallback: first column if mostly unique
+    if df[df.columns[0]].nunique() / len(df) > 0.9:
+        return df.columns[0]
     
-    if sd_pooled == 0:
-        return np.nan
-    
-    return (m2 - m1) / sd_pooled
+    return None
 
 
-def compute_hedges_g(a, b):
-    """Compute Hedges' g (bias-corrected Cohen's d)"""
-    d = compute_cohens_d(a, b)
-    if np.isnan(d):
-        return np.nan
+def detect_grouping_columns(df: pd.DataFrame) -> List[str]:
+    """Detect likely grouping/categorical columns"""
+    candidates = []
     
-    n1, n2 = len(a), len(b)
-    correction = 1 - (3 / (4 * (n1 + n2) - 9))
-    return d * correction
-
-
-def bootstrap_effect_size(resid_vals, group_labels, effect_measure='cohens_d', 
-                          n_boot=1000, ci_level=0.95, seed=42, 
-                          progress_callback=None):
-    """
-    Bootstrap effect size estimation with confidence intervals.
-    
-    Parameters:
-    -----------
-    resid_vals : array-like
-        Residual values
-    group_labels : array-like
-        Group labels
-    effect_measure : str
-        'cohens_d' or 'hedges_g'
-    n_boot : int
-        Number of bootstrap iterations
-    ci_level : float
-        Confidence interval level (default 0.95 for 95% CI)
-    seed : int
-        Random seed
-    progress_callback : callable
-        Optional callback for progress updates
-    """
-    resid_vals = np.asarray(resid_vals)
-    labels = np.asarray(group_labels)
-    
-    # Get unique groups
-    uniq = np.unique(labels[~pd.isna(labels)])
-    if len(uniq) != 2:
-        return {
-            "effect_size": np.nan, 
-            "ci_low": np.nan, 
-            "ci_high": np.nan, 
-            "n_boot": 0,
-            "measure": effect_measure
-        }
-    
-    a_idx = np.where(labels == uniq[0])[0]
-    b_idx = np.where(labels == uniq[1])[0]
-    n1, n2 = len(a_idx), len(b_idx)
-    
-    if n1 < 2 or n2 < 2:
-        return {
-            "effect_size": np.nan, 
-            "ci_low": np.nan, 
-            "ci_high": np.nan, 
-            "n_boot": 0,
-            "measure": effect_measure
-        }
-    
-    rng = np.random.RandomState(seed)
-    boot_effects = []
-    
-    # Choose effect size function
-    if effect_measure == 'hedges_g':
-        effect_func = compute_hedges_g
-    else:
-        effect_func = compute_cohens_d
-    
-    # Bootstrap loop with progress tracking
-    for i in range(n_boot):
-        # Resample within each group
-        boot_a_idx = rng.choice(a_idx, size=n1, replace=True)
-        boot_b_idx = rng.choice(b_idx, size=n2, replace=True)
-        
-        boot_a = resid_vals[boot_a_idx]
-        boot_b = resid_vals[boot_b_idx]
-        
-        effect = effect_func(boot_a, boot_b)
-        if np.isfinite(effect):
-            boot_effects.append(effect)
-        
-        # Progress callback
-        if progress_callback and i % max(1, n_boot // 20) == 0:
-            progress_callback(i / n_boot)
-    
-    boot_effects = np.array(boot_effects)
-    
-    if boot_effects.size < max(50, int(0.1 * n_boot)):
-        # Not enough valid bootstrap samples
-        obs_effect = effect_func(resid_vals[a_idx], resid_vals[b_idx])
-        return {
-            "effect_size": float(obs_effect), 
-            "ci_low": np.nan, 
-            "ci_high": np.nan, 
-            "n_boot": int(boot_effects.size),
-            "measure": effect_measure
-        }
-    
-    # Compute observed effect
-    obs_effect = effect_func(resid_vals[a_idx], resid_vals[b_idx])
-    
-    # Compute confidence intervals
-    alpha = 1 - ci_level
-    ci_low = np.percentile(boot_effects, 100 * alpha / 2)
-    ci_high = np.percentile(boot_effects, 100 * (1 - alpha / 2))
-    
-    return {
-        "effect_size": float(obs_effect),
-        "ci_low": float(ci_low),
-        "ci_high": float(ci_high),
-        "n_boot": int(len(boot_effects)),
-        "measure": effect_measure
-    }
-
-
-def fit_covariate_model(df, outcome_col, covariates):
-    """
-    Fit model with only covariates to get residuals.
-    Returns fitted values and residuals.
-    """
-    if not covariates or outcome_col not in df.columns:
-        # No covariates: return mean as fitted
-        mean_val = df[outcome_col].mean()
-        fitted = np.repeat(mean_val, len(df))
-        resid = df[outcome_col].values - fitted
-        return fitted, resid
-    
-    # Build formula
-    terms = []
-    for c in covariates:
-        if c not in df.columns:
+    for col in df.columns:
+        # Skip ID-like columns
+        col_lower = col.lower()
+        if any(kw in col_lower for kw in ['id', 'sample', 'subject']):
             continue
-        if df[c].dtype == 'object' or df[c].nunique() < 10:
-            terms.append(f"C({c})")
-        else:
-            terms.append(c)
-    
-    if not terms:
-        mean_val = df[outcome_col].mean()
-        fitted = np.repeat(mean_val, len(df))
-        resid = df[outcome_col].values - fitted
-        return fitted, resid
-    
-    formula = f"{outcome_col} ~ " + " + ".join(terms)
-    
-    try:
-        # Fit model on complete cases
-        complete_df = df.dropna(subset=[outcome_col] + covariates)
-        model = smf.ols(formula=formula, data=complete_df).fit()
         
-        # Predict for all rows
-        try:
-            fitted = model.predict(df)
-            resid = df[outcome_col].values - fitted
-        except Exception:
-            # Handle prediction errors by using mean imputation
-            fitted = np.repeat(np.nan, len(df))
-            complete_mask = df[covariates].notna().all(axis=1)
-            fitted[complete_mask] = model.fittedvalues.values
-            mean_fitted = np.nanmean(fitted)
-            fitted = np.nan_to_num(fitted, nan=mean_fitted)
-            resid = df[outcome_col].values - fitted
-        
-        return fitted, resid
+        # Check if categorical or low cardinality
+        if df[col].dtype == 'object' or df[col].nunique() < 20:
+            candidates.append(col)
     
-    except Exception as e:
-        # Fallback to mean
-        mean_val = df[outcome_col].mean()
-        fitted = np.repeat(mean_val, len(df))
-        resid = df[outcome_col].values - fitted
-        return fitted, resid
+    return candidates
 
 
-def run_freedman_lane(df: pd.DataFrame, outcome_col: str, group_col: str, 
-                      covariates: List[str], groupA: Any, groupB: Any,
-                      n_perm: int = 2000, seed: int = 42,
-                      progress_callback=None) -> Dict[str, Any]:
-    """
-    Freedman-Lane permutation test for group differences adjusted for covariates.
+def detect_covariate_columns(df: pd.DataFrame) -> List[str]:
+    """Detect likely covariate columns"""
+    covariate_keywords = ['age', 'sex', 'gender', 'batch', 'plate', 
+                          'bmi', 'weight', 'height', 'race', 'ethnicity',
+                          'smoking', 'education', 'income']
     
-    The Freedman-Lane procedure:
-    1. Fit reduced model (covariates only) to get residuals
-    2. Fit full model (group + covariates) to get observed test statistic
-    3. Permute residuals, add to fitted values from reduced model
-    4. Refit full model on permuted data to get null distribution
-    5. Compute p-value
+    candidates = []
+    for col in df.columns:
+        col_lower = col.lower()
+        if any(kw in col_lower for kw in covariate_keywords):
+            candidates.append(col)
+    
+    return candidates
+
+
+# =============================================================================
+# STATISTICAL FUNCTIONS
+# =============================================================================
+
+def compute_descriptive_stats(df: pd.DataFrame, group_col: Optional[str] = None) -> pd.DataFrame:
+    """Compute descriptive statistics, optionally by group"""
+    
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    
+    if group_col and group_col in df.columns:
+        # By group
+        results = []
+        for group in df[group_col].unique():
+            if pd.isna(group):
+                continue
+            
+            group_data = df[df[group_col] == group]
+            
+            for col in numeric_cols:
+                values = group_data[col].dropna()
+                if len(values) == 0:
+                    continue
+                
+                results.append({
+                    'variable': col,
+                    'group': group,
+                    'n': len(values),
+                    'mean': values.mean(),
+                    'std': values.std(),
+                    'median': values.median(),
+                    'q25': values.quantile(0.25),
+                    'q75': values.quantile(0.75),
+                    'min': values.min(),
+                    'max': values.max()
+                })
+        
+        return pd.DataFrame(results)
+    
+    else:
+        # Overall
+        results = []
+        for col in numeric_cols:
+            values = df[col].dropna()
+            if len(values) == 0:
+                continue
+            
+            results.append({
+                'variable': col,
+                'n': len(values),
+                'mean': values.mean(),
+                'std': values.std(),
+                'median': values.median(),
+                'q25': values.quantile(0.25),
+                'q75': values.quantile(0.75),
+                'min': values.min(),
+                'max': values.max()
+            })
+        
+        return pd.DataFrame(results)
+
+
+def freedman_lane_test(df: pd.DataFrame, outcome_col: str, group_col: str,
+                       covariates: List[str], group_a: Any, group_b: Any,
+                       n_perm: int = 2000, seed: int = 42) -> Dict[str, Any]:
     """
-    df = df.copy().reset_index(drop=True)
+    Freedman-Lane permutation test for group differences with covariate adjustment.
+    
+    This is the CORE permutation method for group comparisons.
+    """
+    
+    df_sub = df[df[group_col].isin([group_a, group_b])].copy().reset_index(drop=True)
+    
+    if len(df_sub) < 4:
+        return {'statistic': np.nan, 'p_value': np.nan, 'method': 'freedman_lane'}
     
     # Step 1: Fit reduced model (covariates only)
-    fitted_reduced, residuals = fit_covariate_model(df, outcome_col, covariates)
-    
-    # Step 2: Fit full model (group + covariates)
-    terms_full = [f"C({group_col})"]
-    for c in covariates:
-        if c in df.columns:
-            if df[c].dtype == 'object' or df[c].nunique() < 10:
-                terms_full.append(f"C({c})")
-            else:
-                terms_full.append(c)
-    
-    formula_full = f"{outcome_col} ~ " + " + ".join(terms_full)
-    
-    try:
-        # Fit on complete cases
-        full_df = df.dropna(subset=[outcome_col, group_col])
-        model_full = smf.ols(formula=formula_full, data=full_df).fit()
-        
-        # Compute mean values for covariates (for prediction)
-        cov_means = {}
-        for c in covariates:
-            if c in full_df.columns:
-                if full_df[c].dtype.kind in 'biufc':
-                    cov_means[c] = float(full_df[c].mean())
+    if not covariates:
+        fitted = np.repeat(df_sub[outcome_col].mean(), len(df_sub))
+        residuals = df_sub[outcome_col].values - fitted
+    else:
+        terms = []
+        for cov in covariates:
+            if cov in df_sub.columns:
+                if df_sub[cov].dtype == 'object' or df_sub[cov].nunique() < 10:
+                    terms.append(f"C({cov})")
                 else:
-                    mode_val = full_df[c].mode()
-                    cov_means[c] = mode_val.iloc[0] if len(mode_val) > 0 else full_df[c].dropna().iloc[0]
+                    terms.append(cov)
         
-        # Predict for both groups
-        row_A = {group_col: groupA, **cov_means}
-        row_B = {group_col: groupB, **cov_means}
-        
-        pred_A = float(model_full.predict(pd.DataFrame([row_A]))[0])
-        pred_B = float(model_full.predict(pd.DataFrame([row_B]))[0])
-        obs_stat = pred_B - pred_A
-        
-    except Exception as e:
-        # Fallback: simple difference of means
-        try:
-            vals = df.dropna(subset=[outcome_col, group_col])
-            mean_A = vals[vals[group_col] == groupA][outcome_col].mean()
-            mean_B = vals[vals[group_col] == groupB][outcome_col].mean()
-            obs_stat = mean_B - mean_A
-        except Exception:
-            return {
-                "obs_stat": np.nan,
-                "p_value": np.nan,
-                "perm_dist": np.array([]),
-                "n_perm_valid": 0
-            }
+        if terms:
+            try:
+                formula_reduced = f"{outcome_col} ~ " + " + ".join(terms)
+                model_reduced = smf.ols(formula_reduced, data=df_sub.dropna()).fit()
+                fitted = model_reduced.fittedvalues
+                residuals = model_reduced.resid
+                
+                # Align with full dataframe
+                fitted_full = np.repeat(np.nan, len(df_sub))
+                resid_full = np.repeat(np.nan, len(df_sub))
+                fitted_full[fitted.index] = fitted.values
+                resid_full[residuals.index] = residuals.values
+                fitted = np.nan_to_num(fitted_full, nan=df_sub[outcome_col].mean())
+                residuals = np.nan_to_num(resid_full, nan=0)
+            except:
+                fitted = np.repeat(df_sub[outcome_col].mean(), len(df_sub))
+                residuals = df_sub[outcome_col].values - fitted
+        else:
+            fitted = np.repeat(df_sub[outcome_col].mean(), len(df_sub))
+            residuals = df_sub[outcome_col].values - fitted
     
-    # Step 3-4: Permutation loop
+    # Step 2: Compute observed statistic (group difference)
+    try:
+        vals_a = df_sub[df_sub[group_col] == group_a][outcome_col]
+        vals_b = df_sub[df_sub[group_col] == group_b][outcome_col]
+        obs_stat = vals_b.mean() - vals_a.mean()
+    except:
+        return {'statistic': np.nan, 'p_value': np.nan, 'method': 'freedman_lane'}
+    
+    # Step 3: Permutation loop
     rng = np.random.RandomState(seed)
     perm_stats = []
-    n = len(df)
     
-    for i in range(n_perm):
+    for _ in range(n_perm):
         # Permute residuals
-        perm_idx = rng.permutation(n)
-        perm_resid = residuals[perm_idx]
+        perm_idx = rng.permutation(len(residuals))
+        y_perm = fitted + residuals[perm_idx]
         
-        # Add to fitted values from reduced model
-        Y_perm = fitted_reduced + perm_resid
+        df_perm = df_sub.copy()
+        df_perm[outcome_col] = y_perm
         
-        # Create permuted dataframe
-        df_perm = df.copy()
-        df_perm[outcome_col] = Y_perm
-        
-        # Refit full model
         try:
-            model_perm = smf.ols(
-                formula=formula_full, 
-                data=df_perm.dropna(subset=[outcome_col, group_col])
-            ).fit()
-            
-            pred_A_perm = float(model_perm.predict(pd.DataFrame([row_A]))[0])
-            pred_B_perm = float(model_perm.predict(pd.DataFrame([row_B]))[0])
-            stat_perm = pred_B_perm - pred_A_perm
+            vals_a_perm = df_perm[df_perm[group_col] == group_a][outcome_col]
+            vals_b_perm = df_perm[df_perm[group_col] == group_b][outcome_col]
+            stat_perm = vals_b_perm.mean() - vals_a_perm.mean()
             
             if np.isfinite(stat_perm):
                 perm_stats.append(stat_perm)
-        except Exception:
+        except:
             continue
-        
-        # Progress callback
-        if progress_callback and i % max(1, n_perm // 20) == 0:
-            progress_callback(i / n_perm)
     
     perm_stats = np.array(perm_stats)
     
-    # Step 5: Compute p-value
-    if perm_stats.size == 0 or not np.isfinite(obs_stat):
-        return {
-            "obs_stat": obs_stat,
-            "p_value": np.nan,
-            "perm_dist": perm_stats,
-            "n_perm_valid": 0
-        }
+    if len(perm_stats) == 0:
+        return {'statistic': obs_stat, 'p_value': np.nan, 'method': 'freedman_lane'}
     
     # Two-tailed p-value
     p_value = (np.sum(np.abs(perm_stats) >= abs(obs_stat)) + 1) / (len(perm_stats) + 1)
     
     return {
-        "obs_stat": float(obs_stat),
-        "p_value": float(p_value),
-        "perm_dist": perm_stats,
-        "n_perm_valid": int(len(perm_stats))
+        'statistic': float(obs_stat),
+        'p_value': float(p_value),
+        'n_perm_valid': len(perm_stats),
+        'method': 'freedman_lane'
     }
 
 
-def analyze_single_feature(feature_name: str, df_feature: pd.DataFrame, 
-                           outcome_col: str, group_col: str, covariates: List[str],
-                           groupA: Any, groupB: Any, comparison_name: str,
-                           config: AnalysisConfig,
-                           progress_callback=None) -> Optional[Dict[str, Any]]:
-    """
-    Analyze a single feature: run Freedman-Lane test and bootstrap effect sizes.
-    """
+def standard_group_test(df: pd.DataFrame, outcome_col: str, group_col: str,
+                       group_a: Any, group_b: Any) -> Dict[str, Any]:
+    """Standard parametric tests (t-test or Mann-Whitney)"""
+    
+    df_sub = df[df[group_col].isin([group_a, group_b])].copy()
+    
+    vals_a = df_sub[df_sub[group_col] == group_a][outcome_col].dropna()
+    vals_b = df_sub[df_sub[group_col] == group_b][outcome_col].dropna()
+    
+    if len(vals_a) < 2 or len(vals_b) < 2:
+        return {'statistic': np.nan, 'p_value': np.nan, 'method': 'insufficient_data'}
+    
+    # Use t-test
     try:
-        # Filter to relevant groups
-        df_sub = df_feature[df_feature[group_col].isin([groupA, groupB])].copy()
-        
-        nA = int((df_sub[group_col] == groupA).sum())
-        nB = int((df_sub[group_col] == groupB).sum())
-        
-        if nA < config.min_n_per_group or nB < config.min_n_per_group:
-            return None
-        
-        # Get residuals for effect size calculation
-        fitted, residuals = fit_covariate_model(df_sub, outcome_col, covariates)
-        
-        # Run Freedman-Lane permutation test
-        perm_result = run_freedman_lane(
-            df_sub, outcome_col, group_col, covariates,
-            groupA, groupB, n_perm=config.n_perm, seed=config.seed,
-            progress_callback=lambda p: progress_callback('perm', p) if progress_callback else None
-        )
-        
-        # Bootstrap effect sizes
-        effect_results = {}
-        for measure in config.effect_size_measures:
-            boot_result = bootstrap_effect_size(
-                residuals, df_sub[group_col].values,
-                effect_measure=measure, n_boot=config.n_boot,
-                ci_level=1-config.alpha, seed=config.seed,
-                progress_callback=lambda p: progress_callback('boot', p) if progress_callback else None
-            )
-            effect_results[measure] = boot_result
-        
-        # Compile results
-        result = {
-            'feature': feature_name,
-            'comparison': comparison_name,
-            'groupA': str(groupA),
-            'groupB': str(groupB),
-            'nA': nA,
-            'nB': nB,
-            'obs_diff': perm_result['obs_stat'],
-            'p_perm': perm_result['p_value'],
-            'n_perm_valid': perm_result['n_perm_valid'],
-            'covariates_used': ','.join(covariates) if covariates else 'none'
-        }
-        
-        # Add effect size results
-        for measure, res in effect_results.items():
-            result[f'{measure}'] = res['effect_size']
-            result[f'{measure}_ci_low'] = res['ci_low']
-            result[f'{measure}_ci_high'] = res['ci_high']
-            result[f'{measure}_n_boot'] = res['n_boot']
-        
-        return result
-        
-    except Exception as e:
+        stat, pval = stats.ttest_ind(vals_a, vals_b, equal_var=False)
         return {
-            'feature': feature_name,
-            'comparison': comparison_name,
-            'error': str(e)[:200]
+            'statistic': float(stat),
+            'p_value': float(pval),
+            'method': 'welch_ttest'
         }
+    except:
+        return {'statistic': np.nan, 'p_value': np.nan, 'method': 'error'}
 
 
-# ---------- Streamlit App ----------
+def correlation_analysis(df: pd.DataFrame, feature_col: str, predictor_col: str,
+                        method: str = 'pearson') -> Dict[str, Any]:
+    """Correlation analysis for continuous predictors"""
+    
+    df_clean = df[[feature_col, predictor_col]].dropna()
+    
+    if len(df_clean) < 3:
+        return {'correlation': np.nan, 'p_value': np.nan, 'method': method}
+    
+    x = df_clean[predictor_col].values
+    y = df_clean[feature_col].values
+    
+    try:
+        if method == 'pearson':
+            corr, pval = pearsonr(x, y)
+        else:  # spearman
+            corr, pval = spearmanr(x, y)
+        
+        return {
+            'correlation': float(corr),
+            'p_value': float(pval),
+            'n': len(df_clean),
+            'method': method
+        }
+    except:
+        return {'correlation': np.nan, 'p_value': np.nan, 'method': method}
+
+
+def compute_effect_size(vals_a, vals_b, method='cohens_d') -> float:
+    """Compute effect size"""
+    
+    vals_a = np.asarray(vals_a).flatten()
+    vals_b = np.asarray(vals_b).flatten()
+    
+    n1, n2 = len(vals_a), len(vals_b)
+    if n1 < 2 or n2 < 2:
+        return np.nan
+    
+    m1, m2 = np.nanmean(vals_a), np.nanmean(vals_b)
+    
+    if method == 'cohens_d':
+        # Pooled standard deviation
+        v1 = np.nanvar(vals_a, ddof=1)
+        v2 = np.nanvar(vals_b, ddof=1)
+        pooled_std = np.sqrt(((n1-1)*v1 + (n2-1)*v2) / (n1+n2-2))
+        
+        if pooled_std == 0:
+            return np.nan
+        
+        return (m2 - m1) / pooled_std
+    
+    elif method == 'hedges_g':
+        # Bias-corrected Cohen's d
+        d = compute_effect_size(vals_a, vals_b, method='cohens_d')
+        if np.isnan(d):
+            return np.nan
+        
+        correction = 1 - (3 / (4*(n1+n2) - 9))
+        return d * correction
+    
+    return np.nan
+
+
+def bootstrap_ci(vals_a, vals_b, effect_func, n_boot=1000, ci=0.95, seed=42):
+    """Bootstrap confidence interval for effect size"""
+    
+    vals_a = np.asarray(vals_a)
+    vals_b = np.asarray(vals_b)
+    
+    n1, n2 = len(vals_a), len(vals_b)
+    if n1 < 2 or n2 < 2:
+        return np.nan, np.nan
+    
+    rng = np.random.RandomState(seed)
+    boot_effects = []
+    
+    for _ in range(n_boot):
+        boot_a = rng.choice(vals_a, size=n1, replace=True)
+        boot_b = rng.choice(vals_b, size=n2, replace=True)
+        
+        effect = effect_func(boot_a, boot_b)
+        if np.isfinite(effect):
+            boot_effects.append(effect)
+    
+    if len(boot_effects) < 50:
+        return np.nan, np.nan
+    
+    alpha = 1 - ci
+    ci_low = np.percentile(boot_effects, 100 * alpha/2)
+    ci_high = np.percentile(boot_effects, 100 * (1-alpha/2))
+    
+    return ci_low, ci_high
+
+
+# =============================================================================
+# ANALYSIS PIPELINE
+# =============================================================================
+
+def analyze_feature(feature_name: str, df_feature: pd.DataFrame,
+                   analysis_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Main analysis function - routes to appropriate test based on analysis type.
+    """
+    
+    try:
+        if analysis_type == 'group_comparison':
+            return analyze_group_comparison(feature_name, df_feature, config)
+        
+        elif analysis_type == 'continuous_association':
+            return analyze_continuous_association(feature_name, df_feature, config)
+        
+        else:
+            return {'feature': feature_name, 'error': 'Unknown analysis type'}
+    
+    except Exception as e:
+        return {'feature': feature_name, 'error': str(e)[:200]}
+
+
+def analyze_group_comparison(feature_name: str, df_feature: pd.DataFrame,
+                             config: Dict[str, Any]) -> Dict[str, Any]:
+    """Analyze group comparison for a single feature"""
+    
+    outcome_col = config['outcome_col']
+    group_col = config['group_col']
+    group_a = config['group_a']
+    group_b = config['group_b']
+    covariates = config.get('covariates', [])
+    method = config.get('method', 'freedman_lane')
+    
+    # Filter to relevant groups
+    df_sub = df_feature[df_feature[group_col].isin([group_a, group_b])].copy()
+    
+    n_a = (df_sub[group_col] == group_a).sum()
+    n_b = (df_sub[group_col] == group_b).sum()
+    
+    min_n = config.get('min_n_per_group', 3)
+    if n_a < min_n or n_b < min_n:
+        return None
+    
+    # Run statistical test
+    if method == 'freedman_lane':
+        test_result = freedman_lane_test(
+            df_sub, outcome_col, group_col, covariates,
+            group_a, group_b,
+            n_perm=config.get('n_perm', 2000),
+            seed=config.get('seed', 42)
+        )
+    else:
+        test_result = standard_group_test(df_sub, outcome_col, group_col, group_a, group_b)
+    
+    # Compute effect size
+    vals_a = df_sub[df_sub[group_col] == group_a][outcome_col].dropna()
+    vals_b = df_sub[df_sub[group_col] == group_b][outcome_col].dropna()
+    
+    effect_size = compute_effect_size(vals_a, vals_b, method='cohens_d')
+    
+    # Bootstrap CI for effect size
+    ci_low, ci_high = bootstrap_ci(
+        vals_a, vals_b,
+        lambda a, b: compute_effect_size(a, b, method='cohens_d'),
+        n_boot=config.get('n_boot', 500),
+        seed=config.get('seed', 42)
+    )
+    
+    # Compile results
+    result = {
+        'feature': feature_name,
+        'comparison': f"{group_b}_vs_{group_a}",
+        'group_a': str(group_a),
+        'group_b': str(group_b),
+        'n_a': int(n_a),
+        'n_b': int(n_b),
+        'mean_a': float(vals_a.mean()),
+        'mean_b': float(vals_b.mean()),
+        'mean_diff': float(vals_b.mean() - vals_a.mean()),
+        'test_statistic': test_result.get('statistic', np.nan),
+        'p_value': test_result.get('p_value', np.nan),
+        'effect_size_d': effect_size,
+        'effect_size_ci_low': ci_low,
+        'effect_size_ci_high': ci_high,
+        'method': test_result.get('method', method),
+        'covariates': ','.join(covariates) if covariates else 'none'
+    }
+    
+    return result
+
+
+def analyze_continuous_association(feature_name: str, df_feature: pd.DataFrame,
+                                   config: Dict[str, Any]) -> Dict[str, Any]:
+    """Analyze continuous association for a single feature"""
+    
+    outcome_col = config['outcome_col']
+    predictor_col = config['predictor_col']
+    method = config.get('correlation_method', 'pearson')
+    
+    result = correlation_analysis(df_feature, outcome_col, predictor_col, method=method)
+    
+    result['feature'] = feature_name
+    result['predictor'] = predictor_col
+    
+    return result
+
+
+# =============================================================================
+# STREAMLIT APP
+# =============================================================================
 
 def main():
     st.set_page_config(
-        page_title='Generic Freedman-Lane Analysis',
+        page_title='Statistical Analysis App',
+        page_icon='📊',
         layout='wide',
         initial_sidebar_state='expanded'
     )
     
-    st.title('🧬 Freedman-Lane Permutation Analysis')
+    # Custom CSS
     st.markdown("""
-    ### Generic statistical analysis for expression/feature data with covariate adjustment
+        <style>
+        .big-font {
+            font-size:20px !important;
+            font-weight: bold;
+        }
+        .success-box {
+            padding: 10px;
+            border-radius: 5px;
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+        }
+        </style>
+        """, unsafe_allow_html=True)
     
-    This app implements the **Freedman-Lane permutation procedure** for testing group differences 
-    while adjusting for covariates, plus bootstrap estimation of effect sizes.
+    st.title('📊 Generic Statistical Analysis for Population Studies')
+    st.markdown('**A comprehensive tool for ANY observational or experimental data**')
     
-    **Supports:**
-    - Any type of expression/feature data (genes, proteins, metabolites, signatures, etc.)
-    - Wide or long data formats
-    - Multiple group comparisons
-    - Flexible covariate adjustment
-    - Parallel processing for speed
-    """)
-    
-    # Sidebar configuration
+    # Sidebar
     with st.sidebar:
-        st.header('⚙️ Configuration')
+        st.header('📚 Help & Documentation')
         
-        st.subheader('Analysis Parameters')
-        config = AnalysisConfig()
+        with st.expander('📋 CSV Format Guide', expanded=False):
+            st.markdown(CSV_INSTRUCTIONS)
         
-        config.n_perm = st.number_input(
-            'Number of permutations',
-            min_value=100, max_value=10000, value=2000, step=100,
-            help='More permutations = more accurate p-values but slower'
-        )
+        with st.expander('📊 Statistical Methods', expanded=False):
+            st.markdown(STATISTICAL_METHODS_INFO)
         
-        config.n_boot = st.number_input(
-            'Number of bootstrap iterations',
-            min_value=100, max_value=10000, value=1000, step=100,
-            help='For confidence intervals around effect sizes'
-        )
-        
-        config.min_n_per_group = st.number_input(
-            'Minimum samples per group',
-            min_value=2, max_value=50, value=8, step=1,
-            help='Features with fewer samples will be skipped'
-        )
-        
-        config.alpha = st.number_input(
-            'Significance level (α)',
-            min_value=0.001, max_value=0.2, value=0.05, step=0.01,
-            help='For FDR correction and confidence intervals'
-        )
-        
-        config.workers = st.number_input(
-            'Parallel workers',
-            min_value=1, max_value=16, value=4, step=1,
-            help='Number of CPU cores to use'
-        )
-        
-        st.subheader('Effect Size Measures')
-        effect_options = st.multiselect(
-            'Select effect size measures',
-            options=['cohens_d', 'hedges_g'],
-            default=['cohens_d'],
-            help="Cohen's d is standard; Hedges' g applies bias correction for small samples"
-        )
-        config.effect_size_measures = effect_options if effect_options else ['cohens_d']
-        
-        config.seed = st.number_input(
-            'Random seed',
-            min_value=0, max_value=9999, value=42, step=1,
-            help='For reproducibility'
-        )
+        with st.expander('💡 Quick Start Guide'):
+            st.markdown("""
+            ### Quick Start (3 steps):
+            
+            1. **Upload Data**
+               - Upload your CSV file(s)
+               - App will auto-detect format
+            
+            2. **Configure Analysis**
+               - Select analysis type
+               - Choose variables
+               - Set parameters
+            
+            3. **Run & Download**
+               - Click "Run Analysis"
+               - Review results
+               - Download CSV
+            
+            ### Example Workflows:
+            
+            **Compare gene expression between cases and controls:**
+            - Analysis type: Group Comparison
+            - Groups: case vs control
+            - Method: Freedman-Lane (if adjusting for age/sex)
+            - Features: all genes
+            
+            **Test correlation between age and biomarkers:**
+            - Analysis type: Continuous Association
+            - Predictor: age
+            - Method: Pearson or Spearman
+            - Features: all biomarkers
+            """)
     
-    # Main content area
-    tab1, tab2, tab3 = st.tabs(['📁 Data Upload', '🔧 Configure Analysis', '📊 Results'])
+    # Main tabs
+    tabs = st.tabs(['📁 Upload Data', '⚙️ Configure', '▶️ Run Analysis', '📊 Results'])
     
-    with tab1:
-        st.header('Data Upload')
+    # =============================================================================
+    # TAB 1: UPLOAD DATA
+    # =============================================================================
+    with tabs[0]:
+        st.header('📁 Step 1: Upload Your Data')
+        
+        st.info('💡 **Tip:** Upload one file with everything, or separate feature and clinical files')
         
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader('Expression/Feature Data')
-            uploaded_features = st.file_uploader(
-                'Upload feature data (CSV)',
+            st.subheader('Primary Data File')
+            uploaded_main = st.file_uploader(
+                'Upload CSV (features and/or clinical data)',
                 type=['csv'],
-                help='Can be wide format (samples × features) or long format (sample, feature, value)'
+                key='main_file',
+                help='This can contain everything, or just features'
             )
             
-            if uploaded_features:
+            if uploaded_main:
                 try:
-                    features_df = pd.read_csv(uploaded_features)
-                    st.success(f'✓ Loaded {features_df.shape[0]} rows × {features_df.shape[1]} columns')
+                    df_main = pd.read_csv(uploaded_main)
+                    st.success(f'✓ Loaded {df_main.shape[0]} rows × {df_main.shape[1]} columns')
                     
-                    # Infer format
-                    inferred_format = infer_data_format(features_df)
-                    st.info(f'Inferred format: **{inferred_format}**')
+                    # Auto-detect format
+                    format_detected, suggestions = detect_data_format(df_main)
+                    st.info(f'🔍 Detected format: **{format_detected.upper()}**')
                     
-                    with st.expander('Preview data'):
-                        st.dataframe(features_df.head(20))
+                    # Store in session
+                    st.session_state['df_main'] = df_main
+                    st.session_state['format_detected'] = format_detected
+                    st.session_state['suggestions'] = suggestions
                     
-                    # Store in session state
-                    st.session_state['features_df'] = features_df
-                    st.session_state['inferred_format'] = inferred_format
+                    with st.expander('👀 Preview Data (first 20 rows)'):
+                        st.dataframe(df_main.head(20), use_container_width=True)
                     
+                    # Data summary
+                    with st.expander('📋 Data Summary'):
+                        st.write('**Column Types:**')
+                        col_types = pd.DataFrame({
+                            'Column': df_main.columns,
+                            'Type': df_main.dtypes.astype(str),
+                            'Non-Null': df_main.notna().sum(),
+                            'Null': df_main.isna().sum(),
+                            'Unique': [df_main[col].nunique() for col in df_main.columns]
+                        })
+                        st.dataframe(col_types, use_container_width=True)
+                
                 except Exception as e:
-                    st.error(f'Error loading file: {e}')
+                    st.error(f'❌ Error loading file: {e}')
         
         with col2:
-            st.subheader('Clinical/Metadata (Optional)')
+            st.subheader('Clinical Data (Optional)')
             uploaded_clinical = st.file_uploader(
-                'Upload clinical data (CSV)',
+                'Upload clinical/metadata CSV',
                 type=['csv'],
-                help='Optional if feature data already contains clinical columns'
+                key='clinical_file',
+                help='Only needed if not included in primary file'
             )
             
             if uploaded_clinical:
                 try:
-                    clinical_df = pd.read_csv(uploaded_clinical)
-                    st.success(f'✓ Loaded {clinical_df.shape[0]} rows × {clinical_df.shape[1]} columns')
+                    df_clinical = pd.read_csv(uploaded_clinical)
+                    st.success(f'✓ Loaded {df_clinical.shape[0]} rows × {df_clinical.shape[1]} columns')
                     
-                    with st.expander('Preview clinical data'):
-                        st.dataframe(clinical_df.head(20))
+                    st.session_state['df_clinical'] = df_clinical
                     
-                    st.session_state['clinical_df'] = clinical_df
-                    
+                    with st.expander('👀 Preview Clinical Data'):
+                        st.dataframe(df_clinical.head(20), use_container_width=True)
+                
                 except Exception as e:
-                    st.error(f'Error loading file: {e}')
-            else:
-                st.session_state['clinical_df'] = None
+                    st.error(f'❌ Error loading file: {e}')
     
-    with tab2:
-        st.header('Configure Analysis')
+    # =============================================================================
+    # TAB 2: CONFIGURE
+    # =============================================================================
+    with tabs[1]:
+        st.header('⚙️ Step 2: Configure Your Analysis')
         
-        if 'features_df' not in st.session_state:
-            st.warning('⚠️ Please upload feature data first')
+        if 'df_main' not in st.session_state:
+            st.warning('⚠️ Please upload data first (see Upload Data tab)')
             st.stop()
         
-        features_df = st.session_state['features_df']
-        clinical_df = st.session_state.get('clinical_df', None)
-        inferred_format = st.session_state.get('inferred_format', 'unknown')
+        df_main = st.session_state['df_main']
+        df_clinical = st.session_state.get('df_clinical', None)
+        format_detected = st.session_state.get('format_detected', 'unknown')
+        suggestions = st.session_state.get('suggestions', {})
         
-        # Data format selection
-        st.subheader('1️⃣ Data Format')
+        # Section 1: Data Format
+        st.subheader('1️⃣ Confirm Data Format')
+        
         format_choice = st.radio(
-            'Confirm data format',
-            options=['wide', 'long', 'auto-detect'],
-            index=0 if inferred_format == 'wide' else (1 if inferred_format == 'long' else 2),
-            horizontal=True
+            'Data format',
+            options=['Wide Format', 'Long Format'],
+            index=0 if format_detected == 'wide' else 1,
+            horizontal=True,
+            help='Wide: one row per sample. Long: one row per measurement'
         )
         
-        if format_choice == 'auto-detect':
-            format_choice = inferred_format
+        is_long = (format_choice == 'Long Format')
         
-        is_long_format = (format_choice == 'long')
+        # Section 2: Column Mapping
+        st.subheader('2️⃣ Identify Columns')
         
-        # Column selection
-        st.subheader('2️⃣ Column Identification')
-        
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         
         with col1:
-            sample_id_col = st.selectbox(
-                'Sample ID column',
-                options=features_df.columns.tolist(),
-                help='Column containing sample identifiers'
+            # ID column
+            id_detected = detect_id_column(df_main)
+            id_col = st.selectbox(
+                'Sample ID Column',
+                options=df_main.columns.tolist(),
+                index=df_main.columns.tolist().index(id_detected) if id_detected else 0,
+                help='Unique identifier for each sample/subject'
             )
-            
-            if is_long_format:
-                feature_col = st.selectbox(
-                    'Feature name column',
-                    options=[c for c in features_df.columns if c != sample_id_col],
-                    help='Column containing feature names (genes, proteins, etc.)'
-                )
-                
-                value_col = st.selectbox(
-                    'Value column',
-                    options=[c for c in features_df.columns if c not in [sample_id_col, feature_col]],
-                    help='Column containing expression/abundance values'
-                )
         
         with col2:
-            if not is_long_format:
-                # Wide format: detect or select feature columns
-                detected_features = detect_numeric_columns(
-                    features_df,
-                    exclude_cols=[sample_id_col]
+            if is_long:
+                # Feature column
+                feature_col = st.selectbox(
+                    'Feature Name Column',
+                    options=[c for c in df_main.columns if c != id_col],
+                    index=0 if 'feature_col' not in suggestions else 
+                          [c for c in df_main.columns if c != id_col].index(suggestions['feature_col']),
+                    help='Column containing feature/variable names'
                 )
-                
-                st.write(f'Detected {len(detected_features)} numeric feature columns')
-                
-                use_all_features = st.checkbox(
-                    'Use all detected numeric columns as features',
-                    value=True
+        
+        with col3:
+            if is_long:
+                # Value column
+                value_col = st.selectbox(
+                    'Value Column',
+                    options=[c for c in df_main.columns if c not in [id_col, feature_col]],
+                    index=0 if 'value_col' not in suggestions else
+                          [c for c in df_main.columns if c not in [id_col, feature_col]].index(suggestions['value_col']),
+                    help='Column containing measurement values'
                 )
-                
-                if not use_all_features:
+        
+        # Feature selection for wide format
+        if not is_long:
+            st.write('**Select Feature Columns:**')
+            
+            # Detect numeric columns
+            numeric_cols = df_main.select_dtypes(include=[np.number]).columns.tolist()
+            numeric_cols = [c for c in numeric_cols if c != id_col]
+            
+            col1, col2 = st.columns([1, 3])
+            
+            with col1:
+                feature_selection_mode = st.radio(
+                    'Feature selection',
+                    options=['All numeric columns', 'Select specific columns'],
+                    index=0
+                )
+            
+            with col2:
+                if feature_selection_mode == 'Select specific columns':
                     selected_features = st.multiselect(
-                        'Select feature columns',
-                        options=detected_features,
-                        default=detected_features[:min(10, len(detected_features))],
-                        help='Choose specific columns to analyze'
+                        'Choose feature columns',
+                        options=numeric_cols,
+                        default=numeric_cols[:min(10, len(numeric_cols))],
+                        help='Select columns to analyze'
                     )
                 else:
-                    selected_features = detected_features
-                
-                if len(selected_features) == 0:
-                    st.error('No feature columns selected!')
-                    st.stop()
+                    selected_features = numeric_cols
+                    st.info(f'Using {len(selected_features)} numeric columns')
         
-        # ID extraction options
-        st.subheader('3️⃣ ID Processing')
-        extract_base_id = st.checkbox(
-            'Extract base ID from sample identifiers',
-            value=True,
-            help='Useful when sample IDs have suffixes (e.g., SAMPLE-01-A → SAMPLE-01)'
-        )
-        
-        if extract_base_id:
-            id_delimiter = st.text_input(
-                'ID delimiter for extraction',
-                value='-',
-                help='Character used to split IDs'
+        # Section 3: Merge Clinical Data
+        if df_clinical is not None:
+            st.subheader('3️⃣ Merge Clinical Data')
+            
+            clinical_id_col = st.selectbox(
+                'ID column in clinical file',
+                options=df_clinical.columns.tolist(),
+                index=0,
+                help='Must match IDs in primary file'
             )
+            
+            # ID extraction options
+            id_extraction = st.radio(
+                'ID matching strategy',
+                options=['Exact match', 'Extract base ID (first part)', 'Extract base ID (first two parts)'],
+                index=1,
+                horizontal=True,
+                help='Use extraction if IDs have suffixes (e.g., SAMPLE-01-A → SAMPLE-01)'
+            )
+            
+            extraction_map = {
+                'Exact match': 'none',
+                'Extract base ID (first part)': 'first_part',
+                'Extract base ID (first two parts)': 'first_two'
+            }
+            
+            id_method = extraction_map[id_extraction]
         else:
-            id_delimiter = None
+            clinical_id_col = None
+            id_method = 'none'
         
-        # Merge data
-        st.subheader('4️⃣ Data Merging')
-        
+        # Convert to long format and merge
         with st.spinner('Preparing data...'):
-            # Convert to long format if needed
-            if is_long_format:
-                df_long = features_df.rename(columns={
-                    sample_id_col: 'sample_id_original',
+            if is_long:
+                df_long = df_main.rename(columns={
+                    id_col: 'sample_id_orig',
                     feature_col: 'feature',
                     value_col: 'value'
                 }).copy()
             else:
-                # Melt wide to long
-                df_long = features_df.melt(
-                    id_vars=[sample_id_col],
+                if not selected_features:
+                    st.error('❌ No feature columns selected')
+                    st.stop()
+                
+                df_long = df_main.melt(
+                    id_vars=[id_col],
                     value_vars=selected_features,
                     var_name='feature',
                     value_name='value'
-                ).rename(columns={sample_id_col: 'sample_id_original'})
+                ).rename(columns={id_col: 'sample_id_orig'})
             
-            # Extract base IDs if requested
-            if extract_base_id:
-                df_long['sample_id'] = df_long['sample_id_original'].apply(
-                    lambda x: smart_id_extraction(x, delimiter=id_delimiter)
-                )
-            else:
-                df_long['sample_id'] = df_long['sample_id_original']
+            # Extract base IDs
+            df_long['sample_id'] = df_long['sample_id_orig'].apply(
+                lambda x: extract_base_id(x, method=id_method)
+            )
             
-            # Merge with clinical data if provided
-            if clinical_df is not None:
-                clinical_id_col = st.selectbox(
-                    'Clinical data ID column',
-                    options=clinical_df.columns.tolist()
+            # Merge clinical if provided
+            if df_clinical is not None:
+                df_clinical['sample_id'] = df_clinical[clinical_id_col].apply(
+                    lambda x: extract_base_id(x, method=id_method)
                 )
                 
-                # Extract base IDs from clinical if requested
-                if extract_base_id:
-                    clinical_df['sample_id'] = clinical_df[clinical_id_col].apply(
-                        lambda x: smart_id_extraction(x, delimiter=id_delimiter)
-                    )
-                else:
-                    clinical_df['sample_id'] = clinical_df[clinical_id_col]
-                
-                # Merge
                 merged_df = df_long.merge(
-                    clinical_df,
+                    df_clinical,
                     on='sample_id',
                     how='left',
-                    suffixes=('', '_clinical')
+                    suffixes=('', '_clin')
                 )
                 
-                st.success(f'✓ Merged data: {merged_df["sample_id"].nunique()} unique samples, {merged_df["feature"].nunique()} features')
+                st.success(f'✓ Merged: {merged_df["sample_id"].nunique()} samples, {merged_df["feature"].nunique()} features')
             else:
                 merged_df = df_long
-                st.info('No clinical data merged')
+                st.info(f'ℹ️ Using {merged_df["sample_id"].nunique()} samples, {merged_df["feature"].nunique()} features')
             
-            # Store merged data
             st.session_state['merged_df'] = merged_df
-            
-            with st.expander('Preview merged data'):
-                st.dataframe(merged_df.head(50))
         
-        # Model configuration
-        st.subheader('5️⃣ Statistical Model')
+        # Show preview
+        with st.expander('👀 Preview Merged Data'):
+            st.dataframe(merged_df.head(50), use_container_width=True)
         
-        # Identify available clinical columns
-        exclude_cols = ['sample_id', 'sample_id_original', 'feature', 'value']
+        # Section 4: Analysis Type Selection
+        st.subheader('4️⃣ Select Analysis Type')
+        
+        analysis_type = st.radio(
+            'What type of analysis?',
+            options=[
+                'Group Comparison (categorical predictor)',
+                'Continuous Association (continuous predictor)',
+                'Descriptive Statistics Only'
+            ],
+            index=0,
+            help='Choose based on your research question'
+        )
+        
+        st.session_state['analysis_type'] = analysis_type
+        
+        # Section 5: Analysis-specific configuration
+        st.subheader('5️⃣ Analysis Configuration')
+        
+        # Get available clinical columns
+        exclude_cols = ['sample_id', 'sample_id_orig', 'feature', 'value']
         clinical_cols = [c for c in merged_df.columns if c not in exclude_cols]
         
         if not clinical_cols:
-            st.error('No clinical/grouping columns available!')
+            st.error('❌ No clinical/grouping columns found!')
             st.stop()
         
-        col1, col2 = st.columns(2)
+        if analysis_type == 'Group Comparison (categorical predictor)':
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Group column
+                group_suggestions = detect_grouping_columns(merged_df)
+                group_col = st.selectbox(
+                    'Grouping Variable',
+                    options=clinical_cols,
+                    index=clinical_cols.index(group_suggestions[0]) if group_suggestions else 0,
+                    help='Categorical variable for group comparisons'
+                )
+                
+                # Show available groups
+                if group_col:
+                    groups = sorted([g for g in merged_df[group_col].dropna().unique()])
+                    st.write(f'**Groups found:** {", ".join(map(str, groups))}')
+                    
+                    # Group selection
+                    if len(groups) >= 2:
+                        comparison_mode = st.radio(
+                            'Comparison mode',
+                            options=['All pairwise', 'Select specific pair'],
+                            index=0
+                        )
+                        
+                        if comparison_mode == 'Select specific pair':
+                            col_a, col_b = st.columns(2)
+                            with col_a:
+                                group_a = st.selectbox('Group A (reference)', options=groups, index=0)
+                            with col_b:
+                                group_b = st.selectbox('Group B (comparison)', options=groups, index=min(1, len(groups)-1))
+                            
+                            comparisons = [(group_a, group_b)]
+                        else:
+                            # Generate all pairs
+                            comparisons = []
+                            for i in range(len(groups)):
+                                for j in range(i+1, len(groups)):
+                                    comparisons.append((groups[i], groups[j]))
+                            
+                            st.info(f'Will perform {len(comparisons)} pairwise comparisons')
+                    else:
+                        st.error('❌ Need at least 2 groups for comparison')
+                        st.stop()
+            
+            with col2:
+                # Covariates
+                covariate_suggestions = detect_covariate_columns(merged_df)
+                covariates = st.multiselect(
+                    'Covariates (adjust for)',
+                    options=[c for c in clinical_cols if c != group_col],
+                    default=[c for c in covariate_suggestions if c != group_col][:3],
+                    help='Variables to control for (age, sex, batch, etc.)'
+                )
+                
+                # Method selection
+                st.write('**Statistical Method:**')
+                method = st.radio(
+                    'Choose method',
+                    options=['Freedman-Lane Permutation (recommended)', 'Standard Parametric Test'],
+                    index=0 if covariates else 1,
+                    help='Freedman-Lane is better for covariate adjustment'
+                )
+                
+                use_permutation = (method == 'Freedman-Lane Permutation (recommended)')
+                
+                if use_permutation:
+                    n_perm = st.number_input(
+                        'Number of permutations',
+                        min_value=100,
+                        max_value=10000,
+                        value=2000,
+                        step=100,
+                        help='More = more accurate but slower'
+                    )
+                else:
+                    n_perm = 0
+            
+            # Store config
+            st.session_state['group_col'] = group_col
+            st.session_state['comparisons'] = comparisons
+            st.session_state['covariates'] = covariates
+            st.session_state['use_permutation'] = use_permutation
+            st.session_state['n_perm'] = n_perm
+        
+        elif analysis_type == 'Continuous Association (continuous predictor)':
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Predictor selection
+                numeric_clinical = [c for c in clinical_cols 
+                                   if pd.api.types.is_numeric_dtype(merged_df[c])]
+                
+                if not numeric_clinical:
+                    st.error('❌ No continuous variables found in clinical data')
+                    st.stop()
+                
+                predictor_col = st.selectbox(
+                    'Predictor Variable',
+                    options=numeric_clinical,
+                    help='Continuous variable to test association with'
+                )
+            
+            with col2:
+                # Method selection
+                correlation_method = st.radio(
+                    'Correlation Method',
+                    options=['Pearson (linear)', 'Spearman (monotonic)'],
+                    index=0,
+                    help='Pearson for linear relationships, Spearman for monotonic'
+                )
+            
+            st.session_state['predictor_col'] = predictor_col
+            st.session_state['correlation_method'] = correlation_method.split()[0].lower()
+        
+        # Section 6: General Settings
+        st.subheader('6️⃣ General Settings')
+        
+        col1, col2, col3 = st.columns(3)
         
         with col1:
-            group_col = st.selectbox(
-                'Group column',
-                options=clinical_cols,
-                help='Categorical variable for group comparisons'
+            min_n_per_group = st.number_input(
+                'Min samples per group',
+                min_value=2,
+                max_value=50,
+                value=5,
+                help='Features with fewer samples will be skipped'
             )
-            
-            if group_col:
-                groups_available = sorted([g for g in merged_df[group_col].dropna().unique()])
-                st.write(f'Groups found: {", ".join(map(str, groups_available))}')
         
         with col2:
-            covariate_cols = st.multiselect(
-                'Covariates to adjust for',
-                options=[c for c in clinical_cols if c != group_col],
-                help='Variables to control for (age, sex, batch, etc.)'
+            alpha_level = st.number_input(
+                'Significance level (α)',
+                min_value=0.001,
+                max_value=0.2,
+                value=0.05,
+                step=0.01,
+                help='For FDR correction'
             )
         
-        # Comparison definition
-        st.subheader('6️⃣ Group Comparisons')
+        with col3:
+            n_workers = st.number_input(
+                'Parallel workers',
+                min_value=1,
+                max_value=16,
+                value=4,
+                help='Number of CPU cores to use'
+            )
         
-        comparison_mode = st.radio(
-            'Comparison mode',
-            options=['All pairwise', 'Specific pairs'],
-            horizontal=True
-        )
+        st.session_state['min_n_per_group'] = min_n_per_group
+        st.session_state['alpha_level'] = alpha_level
+        st.session_state['n_workers'] = n_workers
         
-        comparisons = []
-        
-        if comparison_mode == 'All pairwise':
-            if len(groups_available) < 2:
-                st.error('Need at least 2 groups for comparisons')
-                st.stop()
-            
-            # Generate all pairwise comparisons
-            for i in range(len(groups_available)):
-                for j in range(i + 1, len(groups_available)):
-                    gA, gB = groups_available[i], groups_available[j]
-                    comp_name = f'{gB}_vs_{gA}'
-                    comparisons.append((gA, gB, comp_name))
-            
-            st.info(f'Will perform {len(comparisons)} pairwise comparisons')
-        
-        else:
-            st.write('Define specific comparisons (one per line):')
-            comparison_text = st.text_area(
-                'Comparisons',
-                value='',
-                height=150,
-                help='Format: groupA, groupB, comparison_name (one per line)'
+        # Bootstrap settings (for effect sizes)
+        with st.expander('⚙️ Advanced: Bootstrap Settings'):
+            n_boot = st.number_input(
+                'Bootstrap iterations',
+                min_value=100,
+                max_value=5000,
+                value=500,
+                help='For confidence intervals (more = slower)'
             )
             
-            if comparison_text.strip():
-                for line in comparison_text.strip().split('\n'):
-                    parts = [p.strip() for p in line.split(',')]
-                    if len(parts) >= 2:
-                        gA, gB = parts[0], parts[1]
-                        comp_name = parts[2] if len(parts) >= 3 else f'{gB}_vs_{gA}'
-                        comparisons.append((gA, gB, comp_name))
+            random_seed = st.number_input(
+                'Random seed',
+                min_value=0,
+                max_value=9999,
+                value=42,
+                help='For reproducibility'
+            )
+            
+            st.session_state['n_boot'] = n_boot
+            st.session_state['seed'] = random_seed
         
-        if not comparisons:
-            st.warning('No comparisons defined')
-            st.stop()
-        
-        # Store configuration
-        st.session_state['config'] = config
-        st.session_state['group_col'] = group_col
-        st.session_state['covariate_cols'] = covariate_cols
-        st.session_state['comparisons'] = comparisons
-        
-        st.success(f'✓ Configuration complete: {len(comparisons)} comparisons, {len(covariate_cols)} covariates')
+        st.success('✓ Configuration complete!')
     
-    with tab3:
-        st.header('Run Analysis & View Results')
+    # =============================================================================
+    # TAB 3: RUN ANALYSIS
+    # =============================================================================
+    with tabs[2]:
+        st.header('▶️ Step 3: Run Analysis')
         
-        if 'merged_df' not in st.session_state or 'comparisons' not in st.session_state:
+        if 'merged_df' not in st.session_state:
             st.warning('⚠️ Please configure analysis first')
             st.stop()
         
-        if st.button('🚀 Run Analysis', type='primary'):
-            merged_df = st.session_state['merged_df']
-            config = st.session_state['config']
-            group_col = st.session_state['group_col']
-            covariate_cols = st.session_state['covariate_cols']
-            comparisons = st.session_state['comparisons']
+        # Show summary of configuration
+        st.subheader('📋 Analysis Summary')
+        
+        analysis_type = st.session_state.get('analysis_type', '')
+        
+        if 'Group Comparison' in analysis_type:
+            group_col = st.session_state.get('group_col', '')
+            comparisons = st.session_state.get('comparisons', [])
+            covariates = st.session_state.get('covariates', [])
+            use_perm = st.session_state.get('use_permutation', False)
+            
+            st.write(f'**Analysis:** Group Comparison')
+            st.write(f'**Grouping variable:** {group_col}')
+            st.write(f'**Comparisons:** {len(comparisons)} pairs')
+            st.write(f'**Covariates:** {", ".join(covariates) if covariates else "None"}')
+            st.write(f'**Method:** {"Freedman-Lane Permutation" if use_perm else "Parametric test"}')
+        
+        elif 'Continuous' in analysis_type:
+            predictor_col = st.session_state.get('predictor_col', '')
+            method = st.session_state.get('correlation_method', 'pearson')
+            
+            st.write(f'**Analysis:** Continuous Association')
+            st.write(f'**Predictor:** {predictor_col}')
+            st.write(f'**Method:** {method.capitalize()} correlation')
+        
+        merged_df = st.session_state['merged_df']
+        features = sorted(merged_df['feature'].unique())
+        
+        st.write(f'**Features to analyze:** {len(features)}')
+        st.write(f'**Total samples:** {merged_df["sample_id"].nunique()}')
+        
+        # Run button
+        if st.button('🚀 Run Analysis', type='primary', use_container_width=True):
             
             # Prepare jobs
-            features = sorted(merged_df['feature'].unique())
-            jobs = []
+            if 'Group Comparison' in analysis_type:
+                jobs = []
+                comparisons = st.session_state['comparisons']
+                
+                for comp in comparisons:
+                    group_a, group_b = comp
+                    
+                    for feat in features:
+                        df_feat = merged_df[merged_df['feature'] == feat].copy()
+                        
+                        # Check sample sizes
+                        n_a = (df_feat[st.session_state['group_col']] == group_a).sum()
+                        n_b = (df_feat[st.session_state['group_col']] == group_b).sum()
+                        
+                        if n_a >= st.session_state['min_n_per_group'] and \
+                           n_b >= st.session_state['min_n_per_group']:
+                            
+                            config = {
+                                'outcome_col': 'value',
+                                'group_col': st.session_state['group_col'],
+                                'group_a': group_a,
+                                'group_b': group_b,
+                                'covariates': st.session_state.get('covariates', []),
+                                'method': 'freedman_lane' if st.session_state.get('use_permutation') else 'parametric',
+                                'n_perm': st.session_state.get('n_perm', 2000),
+                                'n_boot': st.session_state.get('n_boot', 500),
+                                'min_n_per_group': st.session_state['min_n_per_group'],
+                                'seed': st.session_state.get('seed', 42)
+                            }
+                            
+                            jobs.append((feat, df_feat, 'group_comparison', config))
             
-            for comp in comparisons:
-                gA, gB, comp_name = comp
+            elif 'Continuous' in analysis_type:
+                jobs = []
+                
                 for feat in features:
                     df_feat = merged_df[merged_df['feature'] == feat].copy()
                     
-                    # Check sample sizes
-                    nA = (df_feat[group_col] == gA).sum()
-                    nB = (df_feat[group_col] == gB).sum()
+                    config = {
+                        'outcome_col': 'value',
+                        'predictor_col': st.session_state['predictor_col'],
+                        'correlation_method': st.session_state.get('correlation_method', 'pearson'),
+                        'seed': st.session_state.get('seed', 42)
+                    }
                     
-                    if nA >= config.min_n_per_group and nB >= config.min_n_per_group:
-                        jobs.append((feat, df_feat, gA, gB, comp_name))
+                    jobs.append((feat, df_feat, 'continuous_association', config))
             
-            if len(jobs) == 0:
-                st.error('No valid jobs to run. Check your group sizes.')
+            if not jobs:
+                st.error('❌ No valid analyses to run (check sample sizes)')
                 st.stop()
             
-            st.info(f'Running {len(jobs)} analyses ({len(features)} features × {len(comparisons)} comparisons)')
+            st.info(f'📊 Running {len(jobs)} analyses...')
             
             # Progress tracking
-            progress_container = st.container()
-            with progress_container:
-                overall_progress = st.progress(0)
-                status_text = st.empty()
-                detail_text = st.empty()
+            progress_bar = st.progress(0)
+            status_text = st.empty()
             
-            # Run analysis
+            # Run analyses
             start_time = time.time()
             results = []
             
-            def run_job_wrapper(job_data):
-                feat, df_feat, gA, gB, comp_name = job_data
-                
-                # Simple progress tracking (can't update Streamlit from worker threads directly)
-                result = analyze_single_feature(
-                    feat, df_feat, 'value', group_col, covariate_cols,
-                    gA, gB, comp_name, config, progress_callback=None
-                )
-                return result
+            n_workers = st.session_state.get('n_workers', 1)
             
-            # Run in parallel or serial
-            if config.workers == 1:
-                # Serial execution with progress
+            if n_workers == 1:
+                # Serial execution
                 for idx, job in enumerate(jobs):
-                    result = run_job_wrapper(job)
-                    if result is not None:
+                    feat, df_feat, atype, config = job
+                    result = analyze_feature(feat, df_feat, atype, config)
+                    
+                    if result:
                         results.append(result)
                     
-                    # Update progress
                     progress = (idx + 1) / len(jobs)
-                    overall_progress.progress(progress)
-                    status_text.text(f'Progress: {idx + 1}/{len(jobs)} jobs completed ({progress*100:.1f}%)')
-                    
-                    if idx % 10 == 0:
-                        detail_text.text(f'Processing: {job[0]} ({job[4]})')
+                    progress_bar.progress(progress)
+                    status_text.text(f'Progress: {idx+1}/{len(jobs)} ({progress*100:.1f}%)')
             
             else:
                 # Parallel execution
-                status_text.text(f'Running in parallel with {config.workers} workers...')
+                status_text.text(f'Running in parallel with {n_workers} workers...')
                 
-                parallel = Parallel(n_jobs=config.workers, backend='loky', verbose=0)
-                results_raw = parallel(
-                    delayed(run_job_wrapper)(job) for job in jobs
-                )
+                def run_job(job):
+                    feat, df_feat, atype, config = job
+                    return analyze_feature(feat, df_feat, atype, config)
                 
-                # Filter out None results
+                parallel = Parallel(n_jobs=n_workers, backend='loky', verbose=0)
+                results_raw = parallel(delayed(run_job)(job) for job in jobs)
+                
                 results = [r for r in results_raw if r is not None]
-                overall_progress.progress(1.0)
+                progress_bar.progress(1.0)
             
             elapsed = time.time() - start_time
-            st.success(f'✓ Analysis complete in {elapsed:.1f} seconds')
+            st.success(f'✅ Analysis complete in {elapsed:.1f} seconds!')
             
             if not results:
-                st.error('No valid results produced')
+                st.error('❌ No valid results produced')
                 st.stop()
             
             # Create results dataframe
             df_results = pd.DataFrame(results)
             
-            # Apply FDR correction per comparison
-            try:
-                from statsmodels.stats.multitest import fdrcorrection
-                
-                df_results['p_adj'] = np.nan
-                df_results['significant'] = False
-                
-                for comp in df_results['comparison'].unique():
-                    mask = df_results['comparison'] == comp
-                    pvals = df_results.loc[mask, 'p_perm'].values
+            # Apply FDR correction
+            if 'p_value' in df_results.columns:
+                try:
+                    from statsmodels.stats.multitest import fdrcorrection
                     
-                    if len(pvals) > 0:
-                        rejected, qvals = fdrcorrection(pvals, alpha=config.alpha)
-                        df_results.loc[mask, 'p_adj'] = qvals
-                        df_results.loc[mask, 'significant'] = rejected
+                    pvals = df_results['p_value'].fillna(1.0).values
+                    rejected, qvals = fdrcorrection(pvals, alpha=st.session_state.get('alpha_level', 0.05))
+                    
+                    df_results['p_adjusted'] = qvals
+                    df_results['significant'] = rejected
+                    
+                    st.info(f'✓ FDR correction applied (α = {st.session_state.get("alpha_level", 0.05)})')
                 
-                st.info(f'FDR correction applied (α = {config.alpha})')
-            
-            except ImportError:
-                st.warning('statsmodels not available for FDR correction')
+                except ImportError:
+                    st.warning('⚠️ Could not apply FDR correction (statsmodels required)')
             
             # Store results
             st.session_state['df_results'] = df_results
+            st.session_state['analysis_complete'] = True
             
-            # Display results
-            st.subheader('Results Summary')
+            # Show quick summary
+            st.subheader('📊 Quick Summary')
             
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
+            
             with col1:
-                st.metric('Total Features', len(df_results['feature'].unique()))
+                st.metric('Features Tested', len(df_results['feature'].unique()))
+            
             with col2:
                 st.metric('Total Tests', len(df_results))
+            
             with col3:
-                n_sig = df_results['significant'].sum() if 'significant' in df_results.columns else 0
-                st.metric('Significant (FDR)', n_sig)
+                if 'significant' in df_results.columns:
+                    n_sig = df_results['significant'].sum()
+                    st.metric('Significant (FDR)', n_sig)
+                else:
+                    st.metric('Significant', 'N/A')
             
-            # Results table
-            st.subheader('Detailed Results')
+            with col4:
+                st.metric('Time Elapsed', f'{elapsed:.1f}s')
             
-            # Add filters
-            col1, col2 = st.columns(2)
-            with col1:
-                show_significant_only = st.checkbox('Show significant only', value=False)
-            with col2:
-                sort_by = st.selectbox(
-                    'Sort by',
-                    options=['p_perm', 'p_adj', 'cohens_d', 'feature'],
-                    index=0
+            st.info('👉 Go to **Results** tab to view and download full results')
+    
+    # =============================================================================
+    # TAB 4: RESULTS
+    # =============================================================================
+    with tabs[3]:
+        st.header('📊 Analysis Results')
+        
+        if 'df_results' not in st.session_state or not st.session_state.get('analysis_complete', False):
+            st.warning('⚠️ No results available yet. Run analysis first!')
+            st.stop()
+        
+        df_results = st.session_state['df_results']
+        
+        # Results summary
+        st.subheader('📈 Summary Statistics')
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric('Features Analyzed', len(df_results['feature'].unique()))
+        
+        with col2:
+            st.metric('Total Tests', len(df_results))
+        
+        with col3:
+            if 'significant' in df_results.columns:
+                n_sig = df_results['significant'].sum()
+                pct_sig = 100 * n_sig / len(df_results)
+                st.metric('Significant Results', f'{n_sig} ({pct_sig:.1f}%)')
+        
+        with col4:
+            if 'p_value' in df_results.columns:
+                median_p = df_results['p_value'].median()
+                st.metric('Median p-value', f'{median_p:.4f}')
+        
+        # Interactive filtering
+        st.subheader('🔍 Filter Results')
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            show_sig_only = st.checkbox(
+                'Show significant only',
+                value=False,
+                help='Filter to FDR-significant results only'
+            )
+        
+        with col2:
+            if 'p_value' in df_results.columns:
+                p_threshold = st.number_input(
+                    'p-value threshold',
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=0.05,
+                    step=0.01,
+                    help='Filter by raw p-value'
                 )
-            
-            # Filter and sort
-            df_display = df_results.copy()
-            if show_significant_only and 'significant' in df_display.columns:
-                df_display = df_display[df_display['significant']]
-            
-            if sort_by in df_display.columns:
-                ascending = sort_by not in ['cohens_d', 'hedges_g']
-                df_display = df_display.sort_values(sort_by, ascending=ascending)
-            
-            # Display
-            st.dataframe(
-                df_display,
-                use_container_width=True,
-                height=400
+        
+        with col3:
+            sort_by = st.selectbox(
+                'Sort by',
+                options=['p_value', 'p_adjusted', 'effect_size_d', 'feature'] 
+                        if 'p_adjusted' in df_results.columns 
+                        else ['p_value', 'correlation', 'feature'],
+                index=0
             )
-            
-            # Download button
-            csv_data = df_results.to_csv(index=False).encode('utf-8')
+        
+        # Apply filters
+        df_display = df_results.copy()
+        
+        if show_sig_only and 'significant' in df_display.columns:
+            df_display = df_display[df_display['significant']]
+        
+        if 'p_value' in df_display.columns:
+            df_display = df_display[df_display['p_value'] <= p_threshold]
+        
+        if sort_by in df_display.columns:
+            ascending = sort_by not in ['effect_size_d', 'correlation']
+            df_display = df_display.sort_values(sort_by, ascending=ascending)
+        
+        # Display results table
+        st.subheader('📋 Results Table')
+        st.dataframe(df_display, use_container_width=True, height=400)
+        
+        # Download buttons
+        st.subheader('💾 Download Results')
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Full results
+            csv_full = df_results.to_csv(index=False).encode('utf-8')
             st.download_button(
-                label='📥 Download Full Results (CSV)',
-                data=csv_data,
-                file_name=f'freedman_lane_results_{time.strftime("%Y%m%d_%H%M%S")}.csv',
-                mime='text/csv'
+                label='📥 Download All Results (CSV)',
+                data=csv_full,
+                file_name=f'analysis_results_full_{time.strftime("%Y%m%d_%H%M%S")}.csv',
+                mime='text/csv',
+                use_container_width=True
+            )
+        
+        with col2:
+            # Filtered results
+            if len(df_display) < len(df_results):
+                csv_filtered = df_display.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label='📥 Download Filtered Results (CSV)',
+                    data=csv_filtered,
+                    file_name=f'analysis_results_filtered_{time.strftime("%Y%m%d_%H%M%S")}.csv',
+                    mime='text/csv',
+                    use_container_width=True
+                )
+        
+        # Visualization
+        st.subheader('📊 Visualization')
+        
+        try:
+            import matplotlib.pyplot as plt
+            
+            viz_type = st.selectbox(
+                'Select visualization',
+                options=['Volcano Plot', 'P-value Distribution', 'Effect Size Distribution']
             )
             
-            # Quick visualization
-            st.subheader('Quick Visualization')
+            fig, ax = plt.subplots(figsize=(10, 6))
             
-            if 'p_adj' in df_results.columns and 'cohens_d' in df_results.columns:
-                import matplotlib.pyplot as plt
+            if viz_type == 'Volcano Plot' and 'p_adjusted' in df_results.columns and 'effect_size_d' in df_results.columns:
+                df_plot = df_results.dropna(subset=['p_adjusted', 'effect_size_d'])
                 
-                fig, ax = plt.subplots(figsize=(10, 6))
-                
-                # Volcano-like plot
-                df_plot = df_results.dropna(subset=['p_adj', 'cohens_d'])
-                
-                # Color by significance
                 colors = ['red' if sig else 'gray' 
                          for sig in df_plot.get('significant', [False]*len(df_plot))]
                 
                 ax.scatter(
-                    df_plot['cohens_d'],
-                    -np.log10(df_plot['p_adj'] + 1e-300),
+                    df_plot['effect_size_d'],
+                    -np.log10(df_plot['p_adjusted'] + 1e-300),
                     c=colors,
                     alpha=0.5,
-                    s=20
+                    s=30
                 )
                 
-                ax.axhline(-np.log10(config.alpha), color='blue', linestyle='--', 
-                          label=f'FDR = {config.alpha}')
-                ax.set_xlabel("Cohen's d (Effect Size)")
-                ax.set_ylabel('-log10(FDR-adjusted p-value)')
-                ax.set_title('Effect Size vs. Significance')
+                alpha_level = st.session_state.get('alpha_level', 0.05)
+                ax.axhline(-np.log10(alpha_level), color='blue', linestyle='--', 
+                          label=f'FDR = {alpha_level}')
+                
+                ax.set_xlabel("Effect Size (Cohen's d)", fontsize=12)
+                ax.set_ylabel('-log10(FDR-adjusted p-value)', fontsize=12)
+                ax.set_title('Volcano Plot', fontsize=14, fontweight='bold')
                 ax.legend()
                 ax.grid(True, alpha=0.3)
+            
+            elif viz_type == 'P-value Distribution' and 'p_value' in df_results.columns:
+                pvals = df_results['p_value'].dropna()
                 
-                st.pyplot(fig)
+                ax.hist(pvals, bins=50, edgecolor='black', alpha=0.7)
+                ax.axvline(0.05, color='red', linestyle='--', label='α = 0.05')
+                ax.set_xlabel('P-value', fontsize=12)
+                ax.set_ylabel('Frequency', fontsize=12)
+                ax.set_title('P-value Distribution', fontsize=14, fontweight='bold')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+            
+            elif viz_type == 'Effect Size Distribution' and 'effect_size_d' in df_results.columns:
+                effect_sizes = df_results['effect_size_d'].dropna()
+                
+                ax.hist(effect_sizes, bins=50, edgecolor='black', alpha=0.7)
+                ax.axvline(0, color='black', linestyle='-', linewidth=2)
+                ax.set_xlabel("Cohen's d", fontsize=12)
+                ax.set_ylabel('Frequency', fontsize=12)
+                ax.set_title('Effect Size Distribution', fontsize=14, fontweight='bold')
+                ax.grid(True, alpha=0.3)
+            
+            st.pyplot(fig)
         
-        # Show previous results if available
-        elif 'df_results' in st.session_state:
-            st.info('Showing previous results. Click "Run Analysis" to recompute.')
-            
-            df_results = st.session_state['df_results']
-            
-            st.subheader('Previous Results')
-            st.dataframe(df_results, use_container_width=True, height=400)
-            
-            csv_data = df_results.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label='📥 Download Results (CSV)',
-                data=csv_data,
-                file_name=f'freedman_lane_results.csv',
-                mime='text/csv'
-            )
+        except Exception as e:
+            st.info('Visualization not available')
 
 
 if __name__ == '__main__':
